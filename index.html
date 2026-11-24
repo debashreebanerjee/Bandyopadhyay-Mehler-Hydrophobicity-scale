@@ -1,0 +1,504 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Bandyopadhyay-Mehler Hydropathy Plots</title>
+  <meta name="description" content="Compute Bandyopadhyay-Mehler hydropathy scores with a centered sliding window, plot them and download CSV.">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="site-header">
+    <img src="assets/bits-hyd.gif" alt="BITS Pilani Hyderabad Campus" class="logo">
+    <div>
+      <h1>Bandyopadhyay-Mehler Hydropathy Plot</h1>
+      <p class="tagline">Hydropathy scale computed with a centered sliding window</p>
+    </div>
+  </header>
+
+  <main>
+    <section class="grid">
+      <div class="card">
+        <h2>How to use</h2>
+        <ol>
+          <li>Paste an amino acid sequence, or one or more sequences in <b>FASTA</b> format
+            (lines starting with <code>&gt;</code>). You can also upload a <code>.fasta</code> file.</li>
+          <li>Example (PDB ID 2CZS): <code>MVSGEVRTKKVPLDTNHKRFYDA</code>
+            <button type="button" class="link" id="example-btn">use this example</button></li>
+          <li>Set the window size. The original C program uses <b>3</b>.</li>
+          <li>Click <b>Get Plot</b>. Each sequence gets a plot and a CSV with
+            <code>CenterPosition, AminoAcid, AverageHydrophobicityScore</code>.</li>
+        </ol>
+        <p class="note">Everything runs in your browser. Your sequences are never uploaded anywhere.</p>
+      </div>
+
+      <form class="card" id="form">
+        <h2>Input</h2>
+        <label for="sequence">Amino acid sequence / FASTA</label>
+        <textarea id="sequence" rows="8" spellcheck="false"
+          placeholder="&gt;my_protein&#10;MVSGEVRTKKVPLDTNHKRFYDA"></textarea>
+
+        <label for="file" class="file-label">or upload a FASTA file</label>
+        <input type="file" id="file" accept=".fasta,.fa,.faa,.fas,.txt">
+
+        <label for="wsize">Window size</label>
+        <input type="number" id="wsize" min="1" step="1" value="3">
+
+        <p class="error" id="error" role="alert"></p>
+        <button type="submit" class="primary">Get Plot</button>
+      </form>
+    </section>
+
+    <section id="results" hidden>
+      <div class="results-head">
+        <h2>Results</h2>
+        <button type="button" id="zip-btn">Download all CSVs (.zip)</button>
+      </div>
+      <div id="results-list"></div>
+    </section>
+
+    <section class="card">
+      <h2>Analysis of the results</h2>
+      <p>For each sequence you get a hydropathy plot and a table of hydrophobicity scores like the ones below.</p>
+      <div class="figures">
+        <figure><img src="assets/img_1.png" alt="Example hydropathy plot"><figcaption>Fig. 1: Hydropathy plot</figcaption></figure>
+        <figure><img src="assets/img_2.png" alt="Example hydrophobicity score table"><figcaption>Fig. 2: Hydrophobicity scores</figcaption></figure>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>References</h2>
+      <p><a href="assets/Bandyopadhyay-Mehler-2008.pdf">Bandyopadhyay, D., &amp; Mehler, E. L. (2008). Quantitative expression of protein heterogeneity:
+        Response of amino acid side chains to their local environment. <i>Proteins: Structure, Function and Bioinformatics</i>, 72(2), 646–659.</a>
+        <a href="https://doi.org/10.1002/prot.21958">https://doi.org/10.1002/prot.21958</a></p>
+      <p>Source of the original C program: <a href="c/finalwebcode.c">c/finalwebcode.c</a></p>
+    </section>
+  </main>
+
+  <footer>
+    &copy; BITS Pilani, Hyderabad Campus · Contact:
+    <a href="mailto:banerjee.debi@hyderabad.bits-pilani.ac.in">banerjee.debi@hyderabad.bits-pilani.ac.in</a>
+  </footer>
+
+  <script>
+/*
+  Browser port of c/finalwebcode.c
+  Computes the Bandyopadhyay-Mehler hydropathy scale with a centered sliding
+  window and produces one CSV per sequence (same columns and number format
+  as the C program: "%d,%c,%.17g").
+*/
+(function () {
+  "use strict";
+
+  /* ---------- Hydropathy scores (identical to the C switch) ---------- */
+  var SCORES = {
+    G: 0.00, C: 1.15, I: 0.97, L: 0.87, F: 0.85, V: 0.83, W: 0.67,
+    Y: 0.60, M: 0.54, A: 0.33, P: 0.32, H: 0.25, T: 0.21, S: 0.05,
+    R: -0.01, Q: -0.05, N: -0.07, D: -0.22, E: -0.24, K: -0.40
+  };
+  function hydropathyScore(aa) {
+    var s = SCORES[aa.toUpperCase()];
+    return s === undefined ? 0.0 : s; /* unknown residue -> 0.0 */
+  }
+
+  var MAX_ID_LEN = 1024;
+
+  /* ---------- Sanitize filename (same characters as the C version) ---------- */
+  function sanitizeFilename(src) {
+    return src.replace(/[\\/:*?"<>|\[\]()]/g, "_");
+  }
+
+  /* ---------- Parse FASTA (or a bare sequence) ---------- */
+  function parseInput(text) {
+    var lines = text.split("\n").map(function (l) { return l.replace(/\r+$/, ""); });
+    var hasHeader = lines.some(function (l) { return l.charAt(0) === ">"; });
+    var entries = [];
+
+    if (!hasHeader) {
+      var seq = text.replace(/\s+/g, "");
+      if (seq) entries.push({ id: "sequence", seq: seq });
+      return entries;
+    }
+
+    var cur = null;
+    lines.forEach(function (line) {
+      if (line.charAt(0) === ">") {
+        cur = { id: line.slice(1, MAX_ID_LEN), seq: "" };
+        entries.push(cur);
+      } else if (cur && line.length > 0) {
+        cur.seq += line.replace(/\s+/g, "");
+      }
+    });
+    return entries;
+  }
+
+  /* ---------- Centered sliding window (same loop as the C program) ---------- */
+  function computeWindows(seq, windowLength) {
+    var slen = seq.length;
+    var hydro = new Array(slen);
+    for (var i = 0; i < slen; i++) hydro[i] = hydropathyScore(seq.charAt(i));
+
+    var rows = [];
+    var numWindows = slen - windowLength + 1;
+    var half = Math.floor(windowLength / 2);
+    for (var j = 0; j < numWindows; j++) {
+      var sum = 0.0;
+      for (var w = 0; w < windowLength; w++) sum += hydro[j + w];
+      var avg = sum / windowLength;
+      var center = j + half; /* 0-based */
+      rows.push({ pos: center + 1, aa: seq.charAt(center), avg: avg });
+    }
+    return rows;
+  }
+
+  /* ---------- printf("%.17g") equivalent ---------- */
+  function formatG17(x) {
+    if (x === 0) return Object.is(x, -0) ? "-0" : "0";
+    var P = 17;
+    var expStr = x.toExponential(P - 1);
+    var exp = parseInt(expStr.split("e")[1], 10);
+    if (exp < -4 || exp >= P) {
+      var parts = expStr.split("e");
+      var mant = parts[0].indexOf(".") >= 0 ? parts[0].replace(/0+$/, "").replace(/\.$/, "") : parts[0];
+      var e = parseInt(parts[1], 10);
+      var eAbs = String(Math.abs(e));
+      if (eAbs.length < 2) eAbs = "0" + eAbs;
+      return mant + "e" + (e < 0 ? "-" : "+") + eAbs;
+    }
+    var fixed = x.toFixed(P - 1 - exp);
+    if (fixed.indexOf(".") >= 0) fixed = fixed.replace(/0+$/, "").replace(/\.$/, "");
+    return fixed;
+  }
+
+  function buildCsv(rows) {
+    var out = ["CenterPosition,AminoAcid,AverageHydrophobicityScore"];
+    rows.forEach(function (r) { out.push(r.pos + "," + r.aa + "," + formatG17(r.avg)); });
+    return out.join("\n") + "\n";
+  }
+
+  /* ---------- SVG plot ---------- */
+  var SVG_NS = "http://www.w3.org/2000/svg";
+
+  function niceTicks(min, max, count) {
+    var span = max - min;
+    if (span <= 0) span = 1;
+    var step = Math.pow(10, Math.floor(Math.log10(span / count)));
+    var err = (count * step) / span;
+    if (err <= 0.15) step *= 10;
+    else if (err <= 0.35) step *= 5;
+    else if (err <= 0.75) step *= 2;
+    var ticks = [];
+    for (var t = Math.ceil(min / step) * step; t <= max + step * 1e-9; t += step) {
+      ticks.push(Math.round(t / step) * step);
+    }
+    return ticks;
+  }
+
+  function el(name, attrs, text) {
+    var n = document.createElementNS(SVG_NS, name);
+    for (var k in attrs) n.setAttribute(k, attrs[k]);
+    if (text !== undefined) n.textContent = text;
+    return n;
+  }
+
+  function makePlot(rows, title, windowLength) {
+    var W = 900, H = 400, m = { top: 40, right: 24, bottom: 56, left: 72 };
+    var iw = W - m.left - m.right, ih = H - m.top - m.bottom;
+
+    var xMin = rows[0].pos, xMax = rows[rows.length - 1].pos;
+    if (xMin === xMax) { xMin -= 1; xMax += 1; }
+    var yMin = Math.min(0, Math.min.apply(null, rows.map(function (r) { return r.avg; })));
+    var yMax = Math.max(0, Math.max.apply(null, rows.map(function (r) { return r.avg; })));
+    var pad = (yMax - yMin) * 0.08 || 0.1;
+    yMin -= pad; yMax += pad;
+
+    function sx(v) { return m.left + ((v - xMin) / (xMax - xMin)) * iw; }
+    function sy(v) { return m.top + ih - ((v - yMin) / (yMax - yMin)) * ih; }
+
+    var svg = el("svg", { xmlns: SVG_NS, viewBox: "0 0 " + W + " " + H, role: "img",
+      "font-family": "Arial, Helvetica, sans-serif", "font-size": "12" });
+    svg.appendChild(el("title", {}, "Hydropathy plot: " + title));
+    svg.appendChild(el("rect", { x: 0, y: 0, width: W, height: H, fill: "#ffffff" }));
+
+    var grid = el("g", { stroke: "#e3e6ea", "stroke-width": 1 });
+    var labels = el("g", { fill: "#444" });
+
+    niceTicks(yMin, yMax, 6).forEach(function (t) {
+      var y = sy(t);
+      grid.appendChild(el("line", { x1: m.left, x2: m.left + iw, y1: y, y2: y }));
+      labels.appendChild(el("text", { x: m.left - 8, y: y + 4, "text-anchor": "end" },
+        String(+t.toFixed(4))));
+    });
+    niceTicks(xMin, xMax, 10).forEach(function (t) {
+      if (t < xMin || t > xMax) return;
+      var x = sx(t);
+      grid.appendChild(el("line", { x1: x, x2: x, y1: m.top, y2: m.top + ih }));
+      labels.appendChild(el("text", { x: x, y: m.top + ih + 18, "text-anchor": "middle" },
+        String(+t.toFixed(4))));
+    });
+    svg.appendChild(grid);
+    svg.appendChild(labels);
+
+    /* zero line */
+    svg.appendChild(el("line", { x1: m.left, x2: m.left + iw, y1: sy(0), y2: sy(0),
+      stroke: "#888", "stroke-dasharray": "4 4" }));
+
+    /* axes box */
+    svg.appendChild(el("rect", { x: m.left, y: m.top, width: iw, height: ih,
+      fill: "none", stroke: "#333" }));
+
+    /* data */
+    var pts = rows.map(function (r) { return sx(r.pos).toFixed(2) + "," + sy(r.avg).toFixed(2); }).join(" ");
+    svg.appendChild(el("polyline", { points: pts, fill: "none", stroke: "#c0392b",
+      "stroke-width": 1.8, "stroke-linejoin": "round" }));
+    if (rows.length <= 150) {
+      var dots = el("g", { fill: "#c0392b" });
+      rows.forEach(function (r) {
+        var c = el("circle", { cx: sx(r.pos), cy: sy(r.avg), r: 2.6 });
+        c.appendChild(el("title", {}, r.pos + " " + r.aa + ": " + formatG17(r.avg)));
+        dots.appendChild(c);
+      });
+      svg.appendChild(dots);
+    }
+
+    /* titles */
+    svg.appendChild(el("text", { x: W / 2, y: 22, "text-anchor": "middle", "font-size": "15",
+      "font-weight": "bold", fill: "#222" }, truncate(title, 90) + " (window = " + windowLength + ")"));
+    svg.appendChild(el("text", { x: m.left + iw / 2, y: H - 14, "text-anchor": "middle",
+      "font-size": "13", fill: "#222" }, "Residue position (window center)"));
+    svg.appendChild(el("text", { x: 18, y: m.top + ih / 2, "text-anchor": "middle", "font-size": "13",
+      fill: "#222", transform: "rotate(-90 18 " + (m.top + ih / 2) + ")" }, "Average hydrophobicity score"));
+
+    return svg;
+  }
+
+  function truncate(s, n) { return s.length > n ? s.slice(0, n - 1) + "…" : s; }
+
+  /* ---------- Downloads ---------- */
+  function downloadBlob(blob, filename) {
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
+  }
+
+  function svgString(svg) {
+    return '<?xml version="1.0" encoding="UTF-8"?>\n' + new XMLSerializer().serializeToString(svg);
+  }
+
+  function downloadPng(svg, filename) {
+    var img = new Image();
+    var url = URL.createObjectURL(new Blob([svgString(svg)], { type: "image/svg+xml" }));
+    img.onload = function () {
+      var scale = 2, vb = svg.viewBox.baseVal;
+      var canvas = document.createElement("canvas");
+      canvas.width = vb.width * scale;
+      canvas.height = vb.height * scale;
+      var ctx = canvas.getContext("2d");
+      ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+      URL.revokeObjectURL(url);
+      canvas.toBlob(function (b) { downloadBlob(b, filename); }, "image/png");
+    };
+    img.src = url;
+  }
+
+  /* Minimal ZIP writer (stored, no compression) */
+  var CRC_TABLE = (function () {
+    var t = new Uint32Array(256);
+    for (var n = 0; n < 256; n++) {
+      var c = n;
+      for (var k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+      t[n] = c >>> 0;
+    }
+    return t;
+  })();
+  function crc32(bytes) {
+    var c = 0xffffffff;
+    for (var i = 0; i < bytes.length; i++) c = CRC_TABLE[(c ^ bytes[i]) & 0xff] ^ (c >>> 8);
+    return (c ^ 0xffffffff) >>> 0;
+  }
+  function makeZip(files) {
+    var enc = new TextEncoder();
+    var parts = [], central = [], offset = 0;
+    var now = new Date();
+    var dosTime = (now.getHours() << 11) | (now.getMinutes() << 5) | (now.getSeconds() >> 1);
+    var dosDate = ((now.getFullYear() - 1980) << 9) | ((now.getMonth() + 1) << 5) | now.getDate();
+
+    files.forEach(function (f) {
+      var name = enc.encode(f.name), data = enc.encode(f.content), crc = crc32(data);
+      var lh = new DataView(new ArrayBuffer(30));
+      lh.setUint32(0, 0x04034b50, true); lh.setUint16(4, 20, true); lh.setUint16(6, 0x0800, true);
+      lh.setUint16(8, 0, true); lh.setUint16(10, dosTime, true); lh.setUint16(12, dosDate, true);
+      lh.setUint32(14, crc, true); lh.setUint32(18, data.length, true); lh.setUint32(22, data.length, true);
+      lh.setUint16(26, name.length, true); lh.setUint16(28, 0, true);
+      parts.push(lh, name, data);
+
+      var ch = new DataView(new ArrayBuffer(46));
+      ch.setUint32(0, 0x02014b50, true); ch.setUint16(4, 20, true); ch.setUint16(6, 20, true);
+      ch.setUint16(8, 0x0800, true); ch.setUint16(10, 0, true); ch.setUint16(12, dosTime, true);
+      ch.setUint16(14, dosDate, true); ch.setUint32(16, crc, true); ch.setUint32(20, data.length, true);
+      ch.setUint32(24, data.length, true); ch.setUint16(28, name.length, true);
+      ch.setUint32(42, offset, true);
+      central.push(ch, name);
+      offset += 30 + name.length + data.length;
+    });
+
+    var cdSize = central.reduce(function (s, p) { return s + p.byteLength; }, 0);
+    var end = new DataView(new ArrayBuffer(22));
+    end.setUint32(0, 0x06054b50, true); end.setUint16(8, files.length, true);
+    end.setUint16(10, files.length, true); end.setUint32(12, cdSize, true); end.setUint32(16, offset, true);
+    return new Blob(parts.concat(central, [end]), { type: "application/zip" });
+  }
+
+  /* ---------- UI ---------- */
+  var form = document.getElementById("form");
+  var seqInput = document.getElementById("sequence");
+  var fileInput = document.getElementById("file");
+  var wInput = document.getElementById("wsize");
+  var errorEl = document.getElementById("error");
+  var resultsSec = document.getElementById("results");
+  var list = document.getElementById("results-list");
+  var zipBtn = document.getElementById("zip-btn");
+  var lastFiles = [], lastWindow = 3;
+
+  document.getElementById("example-btn").addEventListener("click", function () {
+    seqInput.value = ">2CZS\nMVSGEVRTKKVPLDTNHKRFYDA";
+    wInput.value = 3;
+  });
+
+  fileInput.addEventListener("change", function () {
+    var f = fileInput.files[0];
+    if (!f) return;
+    var reader = new FileReader();
+    reader.onload = function () { seqInput.value = reader.result; };
+    reader.readAsText(f);
+  });
+
+  zipBtn.addEventListener("click", function () {
+    if (!lastFiles.length) return;
+    downloadBlob(makeZip(lastFiles), "Hydropathy_CSV_window_length_" + lastWindow + ".zip");
+  });
+
+  form.addEventListener("submit", function (ev) {
+    ev.preventDefault();
+    errorEl.textContent = "";
+
+    var windowLength = Number(wInput.value);
+    if (!Number.isInteger(windowLength) || windowLength < 1) {
+      errorEl.textContent = "Window size must be a whole number of at least 1.";
+      return;
+    }
+    var entries = parseInput(seqInput.value);
+    if (!entries.length) {
+      errorEl.textContent = "Please enter an amino acid sequence or FASTA text.";
+      return;
+    }
+
+    list.textContent = "";
+    lastFiles = [];
+    lastWindow = windowLength;
+    var folder = "Hydropathy_CSV_window_length_" + windowLength + "/";
+    var used = {};
+
+    entries.forEach(function (entry, idx) {
+      var rows = computeWindows(entry.seq, windowLength);
+      var csv = buildCsv(rows);
+      var base = sanitizeFilename(entry.id) + "_window_" + windowLength;
+      var fname = base + ".csv";
+      if (used[fname]) { used[fname]++; fname = base + "_" + used[fname] + ".csv"; } else used[fname] = 1;
+      lastFiles.push({ name: folder + fname, content: csv });
+
+      var card = document.createElement("article");
+      card.className = "card result";
+      var h = document.createElement("h3");
+      h.textContent = (idx + 1) + ". " + (entry.id || "(no id)");
+      var meta = document.createElement("p");
+      meta.className = "meta";
+      meta.textContent = entry.seq.length + " residues · " + rows.length + " windows · window size " + windowLength;
+      card.appendChild(h);
+      card.appendChild(meta);
+
+      if (!rows.length) {
+        var p = document.createElement("p");
+        p.className = "error";
+        p.textContent = "Sequence is shorter than the window size, so there are no windows to plot. The CSV contains only the header.";
+        card.appendChild(p);
+      } else {
+        var plotDiv = document.createElement("div");
+        plotDiv.className = "plot";
+        var svg = makePlot(rows, entry.id || "sequence", windowLength);
+        plotDiv.appendChild(svg);
+        card.appendChild(plotDiv);
+
+        var actions = document.createElement("div");
+        actions.className = "actions";
+        actions.appendChild(button("Download CSV", function () {
+          downloadBlob(new Blob([csv], { type: "text/csv" }), fname);
+        }));
+        actions.appendChild(button("Download SVG", function () {
+          downloadBlob(new Blob([svgString(svg)], { type: "image/svg+xml" }), base + ".svg");
+        }));
+        actions.appendChild(button("Download PNG", function () { downloadPng(svg, base + ".png"); }));
+        card.appendChild(actions);
+        card.appendChild(makeTable(rows));
+      }
+      if (!rows.length) {
+        var a2 = document.createElement("div");
+        a2.className = "actions";
+        a2.appendChild(button("Download CSV", function () {
+          downloadBlob(new Blob([csv], { type: "text/csv" }), fname);
+        }));
+        card.appendChild(a2);
+      }
+      list.appendChild(card);
+    });
+
+    zipBtn.hidden = entries.length < 2;
+    resultsSec.hidden = false;
+    resultsSec.scrollIntoView({ behavior: "smooth", block: "start" });
+  });
+
+  function button(label, onClick) {
+    var b = document.createElement("button");
+    b.type = "button";
+    b.textContent = label;
+    b.addEventListener("click", onClick);
+    return b;
+  }
+
+  function makeTable(rows) {
+    var LIMIT = 2000;
+    var det = document.createElement("details");
+    var sum = document.createElement("summary");
+    sum.textContent = "Show score table" + (rows.length > LIMIT ? " (first " + LIMIT + " rows; full data in the CSV)" : "");
+    det.appendChild(sum);
+    var wrap = document.createElement("div");
+    wrap.className = "table-wrap";
+    var t = document.createElement("table");
+    t.innerHTML = "<thead><tr><th>CenterPosition</th><th>AminoAcid</th><th>AverageHydrophobicityScore</th></tr></thead>";
+    var tb = document.createElement("tbody");
+    rows.slice(0, LIMIT).forEach(function (r) {
+      var tr = document.createElement("tr");
+      [r.pos, r.aa, formatG17(r.avg)].forEach(function (v) {
+        var td = document.createElement("td");
+        td.textContent = v;
+        tr.appendChild(td);
+      });
+      tb.appendChild(tr);
+    });
+    t.appendChild(tb);
+    wrap.appendChild(t);
+    det.appendChild(wrap);
+    return det;
+  }
+
+  /* expose for testing */
+  window.Hydropathy = { parseInput: parseInput, computeWindows: computeWindows, formatG17: formatG17, buildCsv: buildCsv };
+})();
+</script>
+</body>
+</html>
